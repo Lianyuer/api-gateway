@@ -1,9 +1,15 @@
 package com.yu.yuapigateway;
 
 import cn.hutool.core.codec.Base64;
+import com.yu.apicommon.model.entity.InterfaceInfo;
+import com.yu.apicommon.model.entity.User;
+import com.yu.apicommon.service.InnerInterfaceInfoService;
+import com.yu.apicommon.service.InnerUserInterfaceInfoService;
+import com.yu.apicommon.service.InnerUserService;
 import com.yu.yuapiclientsdk.utils.SignUtils;
 import lombok.extern.slf4j.Slf4j;
 
+import org.apache.dubbo.config.annotation.DubboReference;
 import org.reactivestreams.Publisher;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
@@ -37,6 +43,15 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @DubboReference
+    private InnerInterfaceInfoService innerInterfaceInfoService;
+
+    @DubboReference
+    private InnerUserInterfaceInfoService innerUserInterfaceInfoService;
+
+    @DubboReference
+    private InnerUserService innerUserService;
+
     // IP 白名单
     private static final List<String> IP_WHITE_LIST = Arrays.asList("127.0.0.1");
 
@@ -46,9 +61,11 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
         // 1、用户发送请求到 API 网关
         // 2、请求日志
         ServerHttpRequest request = exchange.getRequest();
+        String path = request.getPath().value();
+        String method = request.getMethod().toString();
         log.info("请求唯一标识: {}", request.getId());
-        log.info("请求路径: {}", request.getPath().value());
-        log.info("请求方法: {}", request.getMethod());
+        log.info("请求路径: {}", path);
+        log.info("请求方法: {}", method);
         log.info("请求参数: {}", request.getQueryParams());
         String sourceAddress = Objects.requireNonNull(request.getLocalAddress()).getHostString();
         log.info("请求来源地址: {}", sourceAddress);
@@ -75,16 +92,22 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
         }
         String signature = headers.getFirst("signature");
         // 从数据库中查询secretKey
-        // todo 不应该在网关层直接进行数据库操作
+        // todo 不应该在网关层直接进行数据库操作，调用公共服务去请求数据
 //        User existUser = userService.getOne(new QueryWrapper<User>().eq("accessKey", accessKey));
-
-        if (!"testAccessKey".equals(accessKey)) {
+        User invokeUser = null;
+        try {
+            invokeUser = innerUserService.getInvokeUser(accessKey);
+        } catch (Exception e) {
+            log.error("getInvokeUser error!");
+        }
+        if (invokeUser == null) {
 //            throw new ApiException(ErrorCode.NO_AUTH_ERROR, "无权限");
             return handleNoAuth(response);
         }
         // 构造需要参与签名的参数
 //        String secretKey = existUser.getSecretKey();
-        String secretKey = "testSecretKey";
+        // 从获取到的用户信息中获取secretKey，再次进行签名比对
+        String secretKey = invokeUser.getSecretKey();
         HashMap<String, String> paramsMap = new HashMap<>();
         paramsMap.put("accessKey", accessKey);
         paramsMap.put("timestamp", timestamp);
@@ -92,7 +115,7 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
         paramsMap.put("body", rawBody);
         // 重新生成签名
         String twiceSignature = SignUtils.signature(timestamp, accessKey, secretKey, nonceStr, rawBody, paramsMap);
-        if (!twiceSignature.equals(signature)) {
+        if (signature == null || !signature.equals(twiceSignature)) {
 //            throw new ApiException(ErrorCode.SIGN_ERROR, "签名错误");
             return handleNoAuth(response);
         }
@@ -116,12 +139,21 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
             stringRedisTemplate.opsForValue().set(nonceStrKey, nonceStr, FIVE_MINUTES, TimeUnit.SECONDS);
         }
         // 5、请求的模拟接口是否存在？
-        // todo 从数据库中查询模拟接口是否存在，以及请求方法是否匹配 (还可以校验请求参数)
+        // todo 调用公共服务，从数据库中查询模拟接口是否存在，以及请求方法是否匹配 (还可以校验请求参数)
+        InterfaceInfo interfaceInfo = null;
+        try {
+            interfaceInfo = innerInterfaceInfoService.getInterfaceInfo(path, method);
+        } catch (Exception e) {
+            log.error("getInterfaceInfo error！");
+        }
+        if (interfaceInfo == null) {
+            return handleNoAuth(response);
+        }
         // 6、请求转发，调用模拟接口
 //        Mono<Void> filter = chain.filter(exchange);
         // 7、响应日志
 //        log.info("响应：{}", response.getStatusCode());
-        return handleResponse(exchange, chain);
+        return handleResponse(exchange, chain, interfaceInfo.getId(), invokeUser.getId());
 
     }
 
@@ -137,7 +169,7 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
      * @param chain
      * @return
      */
-    public Mono<Void> handleResponse(ServerWebExchange exchange, GatewayFilterChain chain) {
+    public Mono<Void> handleResponse(ServerWebExchange exchange, GatewayFilterChain chain, long interfaceInfoId, long userId) {
         try {
             // 获取原始的响应对象
             ServerHttpResponse originalResponse = exchange.getResponse();
@@ -164,6 +196,11 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
                             // (这里就理解为它在拼接字符串,它把缓冲区的数据取出来，一点一点拼接好)
                             return super.writeWith(fluxBody.map(dataBuffer -> {
                                 // 8、todo 调用成功，接口次数 + 1
+                                try {
+                                    innerUserInterfaceInfoService.invokeCount(interfaceInfoId, userId);
+                                } catch (Exception e) {
+                                    log.error("invokeCount error!");
+                                }
                                 // 读取响应体的内容并转换为字节数组
                                 byte[] content = new byte[dataBuffer.readableByteCount()];
                                 dataBuffer.read(content);

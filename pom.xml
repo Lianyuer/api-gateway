@@ -20,6 +20,11 @@
             <artifactId>spring-cloud-starter-gateway</artifactId>
         </dependency>
 
+        <dependency>
+            <groupId>com.yu</groupId>
+            <artifactId>api-common</artifactId>
+            <version>0.0.1</version>
+        </dependency>
         <!-- dubbo -->
         <dependency>
             <groupId>org.apache.dubbo</groupId>

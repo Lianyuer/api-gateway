@@ -5,6 +5,11 @@ test:
   uri: http://localhost:8101
 
 spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/api_open_platform
+    username: root
+    password: 123456
   cloud:
     gateway:
       default-filters:
@@ -38,5 +43,8 @@ dubbo:
     qos-port: 33333
   registry:
     # 配置注册中心为 Nacos，使用的地址是 nacos://localhost:8848
-    address: nacos://localhost:8848?username=nacos&password=nacos
-    parameters.register-consumer-url: true
+    address: nacos://localhost:8848
+  consumer:
+    timeout: 5000  # 增加到5秒
+    check: false
+    retries: 3     # 重试次数
