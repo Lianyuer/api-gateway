@@ -1,4 +1,4 @@
-package com.yu.yuapigateway.provider;
+package com.yu.provider;
 
 import java.util.concurrent.CompletableFuture;
 
