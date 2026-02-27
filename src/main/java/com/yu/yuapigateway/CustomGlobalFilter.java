@@ -104,6 +104,7 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
 //            throw new ApiException(ErrorCode.NO_AUTH_ERROR, "无权限");
             return handleNoAuth(response);
         }
+        // todo 判断用户调用次数是否足够，不够则无权限进行调用
         // 构造需要参与签名的参数
 //        String secretKey = existUser.getSecretKey();
         // 从获取到的用户信息中获取secretKey，再次进行签名比对
