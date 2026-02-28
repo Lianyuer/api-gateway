@@ -1,6 +1,8 @@
 package com.yu.yuapigateway;
 
 import cn.hutool.core.codec.Base64;
+import cn.hutool.json.JSONUtil;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.yu.apicommon.model.entity.InterfaceInfo;
 import com.yu.apicommon.model.entity.User;
 import com.yu.apicommon.service.InnerInterfaceInfoService;
@@ -20,6 +22,7 @@ import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.http.server.reactive.ServerHttpResponseDecorator;
@@ -176,62 +179,82 @@ public class CustomGlobalFilter implements GlobalFilter, Ordered {
             ServerHttpResponse originalResponse = exchange.getResponse();
             // 获取数据缓冲工厂
             DataBufferFactory bufferFactory = originalResponse.bufferFactory();
-            // 获取响应的状态码
-            HttpStatus statusCode = originalResponse.getStatusCode();
 
-            // 判断状态码是否为200 OK(按道理来说,现在没有调用,是拿不到响应码的,对这个保持怀疑 沉思.jpg)
-            if (statusCode == HttpStatus.OK) {
-                // 创建一个装饰后的响应对象(开始穿装备，增强能力)
-                ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
+            // 创建一个装饰后的响应对象
+            ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
 
-                    // 重写writeWith方法，用于处理响应体的数据
-                    // 这段方法就是只要当我们的模拟接口调用完成之后,等它返回结果，
-                    // 就会调用writeWith方法,我们就能根据响应结果做一些自己的处理
-                    @Override
-                    public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
-                        log.info("body instanceof Flux: {}", (body instanceof Flux));
-                        // 判断响应体是否是Flux类型
-                        if (body instanceof Flux) {
-                            Flux<? extends DataBuffer> fluxBody = Flux.from(body);
-                            // 返回一个处理后的响应体
-                            // (这里就理解为它在拼接字符串,它把缓冲区的数据取出来，一点一点拼接好)
-                            return super.writeWith(fluxBody.map(dataBuffer -> {
-                                // 8、todo 调用成功，接口次数 + 1
-                                try {
-                                    innerUserInterfaceInfoService.invokeCount(interfaceInfoId, userId);
-                                } catch (Exception e) {
-                                    log.error("invokeCount error!");
-                                }
-                                // 读取响应体的内容并转换为字节数组
-                                byte[] content = new byte[dataBuffer.readableByteCount()];
-                                dataBuffer.read(content);
-                                DataBufferUtils.release(dataBuffer);//释放掉内存
-                                // 构建日志
-                                StringBuilder sb2 = new StringBuilder(200);
-                                List<Object> rspArgs = new ArrayList<>();
-                                rspArgs.add(originalResponse.getStatusCode());
-                                //rspArgs.add(requestUrl);
-                                String data = new String(content, StandardCharsets.UTF_8);//data
-                                sb2.append(data);
-                                // 打印日志
-                                log.info("响应结果：" + data);
-                                // 将处理后的内容重新包装成DataBuffer并返回
-                                return bufferFactory.wrap(content);
-                            }));
-                        } else {
-                            log.error("<--- {} 响应code异常", getStatusCode());
-                        }
-                        return super.writeWith(body);
+                @Override
+                public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
+                    log.info("body instanceof Flux: {}", (body instanceof Flux));
+
+                    // 判断响应体是否是Flux类型
+                    if (body instanceof Flux) {
+                        Flux<? extends DataBuffer> fluxBody = Flux.from(body);
+
+                        // 使用join收集完整的响应体数据
+                        return DataBufferUtils.join(fluxBody)
+                                .flatMap(dataBuffer -> {
+                                    try {
+                                        // 先尝试调用次数+1
+                                        innerUserInterfaceInfoService.invokeCount(interfaceInfoId, userId);
+
+                                        // 调用成功，正常返回响应数据
+                                        byte[] content = new byte[dataBuffer.readableByteCount()];
+                                        dataBuffer.read(content);
+                                        DataBufferUtils.release(dataBuffer);
+
+                                        // 打印成功日志
+                                        String data = new String(content, StandardCharsets.UTF_8);
+                                        log.info("响应结果：" + data);
+
+                                        // 返回原始响应
+                                        return super.writeWith(Mono.just(bufferFactory.wrap(content)));
+
+                                    } catch (Exception e) {
+                                        log.error("invokeCount error!", e);
+
+                                        // 释放原始数据缓冲区
+                                        DataBufferUtils.release(dataBuffer);
+
+                                        // 构造自定义错误响应
+                                        // 这里可以根据具体错误类型构造不同的错误信息
+                                        String errorMessage = "调用次数不足";
+
+                                        // 构造错误响应的JSON格式
+                                        Map<String, Object> errorResponse = new HashMap<>();
+                                        errorResponse.put("code", 500);
+                                        errorResponse.put("message", errorMessage);
+                                        errorResponse.put("timestamp", System.currentTimeMillis());
+
+                                        // 使用Hutool的JSONUtil转换为JSON字符串
+                                        String errorJson = JSONUtil.toJsonStr(errorResponse);
+
+                                        // 设置响应状态码和响应头
+                                        originalResponse.setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR);
+                                        originalResponse.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+                                        // 返回错误响应
+                                        DataBuffer errorBuffer = bufferFactory.wrap(errorJson.getBytes(StandardCharsets.UTF_8));
+                                        return super.writeWith(Mono.just(errorBuffer));
+                                    }
+                                });
                     }
-                };
-                // 对于200 OK的请求,将装饰后的响应对象传递给下一个过滤器链,并继续处理(设置repsonse对象为装饰过的)
-                return chain.filter(exchange.mutate().response(decoratedResponse).build());
-            }
-            // 对于非200 OK的请求，直接返回，进行降级处理
-            return chain.filter(exchange);
+                    return super.writeWith(body);
+                }
+
+                // 可选：重写writeAndFlushWith方法以处理更复杂的场景
+                @Override
+                public Mono<Void> writeAndFlushWith(Publisher<? extends Publisher<? extends DataBuffer>> body) {
+                    return writeWith(Flux.from(body).flatMapSequential(p -> p));
+                }
+            };
+
+            // 将装饰后的响应对象传递给下一个过滤器链
+            return chain.filter(exchange.mutate().response(decoratedResponse).build());
+
         } catch (Exception e) {
             // 处理异常情况，记录错误日志
-            log.error("网关处理响应异常" + e);
+            log.error("网关处理响应异常", e);
             return chain.filter(exchange);
         }
     }
